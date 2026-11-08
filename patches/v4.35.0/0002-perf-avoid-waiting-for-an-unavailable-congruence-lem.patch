@@ -1,0 +1,22 @@
+From 157b9c3bbb78662567088ce96aa43042227b1210 Mon Sep 17 00:00:00 2001
+From: xukp20 <71265541+xukp20@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 16:51:58 +0800
+Subject: [PATCH 2/2] perf: avoid waiting for an unavailable congruence lemma
+
+---
+ src/Lean/Meta/CongrTheorems.lean | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/Lean/Meta/CongrTheorems.lean b/src/Lean/Meta/CongrTheorems.lean
+index 2b0f7de..0e4f8fa 100644
+--- a/src/Lean/Meta/CongrTheorems.lean
++++ b/src/Lean/Meta/CongrTheorems.lean
+@@ -472,6 +472,8 @@ def mkCongrSimpForConst? (declName : Name) (levels : List Level) : MetaM (Option
+   try
+     unless (← getEnv).containsOnBranch thmName do
+       let _ ← executeReservedNameAction thmName
++    unless (← getEnv).containsOnBranch thmName do
++      return none
+     let proof := mkConst thmName levels
+     let type ← inferType proof
+     let some argKinds := congrKindsExt.find? (← getEnv) thmName

@@ -1,0 +1,184 @@
+From 9431b71e07a65ed40c64739261a4b1028db49b85 Mon Sep 17 00:00:00 2001
+From: xukp20 <71265541+xukp20@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 16:51:57 +0800
+Subject: [PATCH 1/2] perf: check inductive signatures before waiting for
+ proofs
+
+---
+ src/Lean/AddDecl.lean                    | 36 ++++++++++++++
+ src/Lean/Elab/MutualInductive.lean       | 10 ++++
+ src/Lean/Environment.lean                | 60 ++++++++++++++++++++++++
+ src/Lean/Meta/Constructions/CasesOn.lean | 13 ++++-
+ 4 files changed, 118 insertions(+), 1 deletion(-)
+
+diff --git a/src/Lean/AddDecl.lean b/src/Lean/AddDecl.lean
+index 512ba0f..253ed0b 100644
+--- a/src/Lean/AddDecl.lean
++++ b/src/Lean/AddDecl.lean
+@@ -126,6 +126,42 @@ private def addDeclCore (decl : Declaration) (forceExpose : Bool) : CoreM Unit :
+         exportedInfo? := some <| .axiomInfo { op with }
+       pure (op.name, .opaqueInfo op, .opaque)
+     | .axiomDecl ax => pure (ax.name, .axiomInfo ax, .axiom)
++    | .inductDecl .. =>
++      if Elab.async.get (← getOptions) && !debug.skipKernelTC.get (← getOptions) then
++        let env ← getEnv
++        match ← env.addInductiveSignature (Core.getMaxHeartbeats (← getOptions)).toUSize
++            (maxRecDepth.get (← getOptions)).toUSize decl (← read).cancelTk? with
++        | .ok async =>
++          trace[addDecl] "inductive signature checked; scheduling complete check"
++          setEnv async.mainEnv
++          let cancelTk ← IO.CancelToken.new
++          let ngen ← getNGen
++          let declNGen ← getDeclNGen
++          -- The kernel checks fixed declaration names. Give this task a separate name supply
++          -- so scheduling it does not advance either generator of the elaborating branch.
++          let checkPrefix := Name.num (.str ngen.namePrefix "_inductiveCheck") ngen.idx ++
++            decl.getTopLevelNames.head!
++          let checkAct ←
++            try
++              setNGen { namePrefix := checkPrefix }
++              setDeclNGen { namePrefix := checkPrefix }
++              Core.wrapAsyncAsSnapshot (cancelTk? := cancelTk) fun _ => do
++                setEnv async.asyncEnv
++                try
++                  doAdd
++                finally
++                  async.commitChecked (← getEnv)
++            finally
++              setNGen ngen
++              setDeclNGen declNGen
++          let t ← BaseIO.mapTask checkAct env.checked
++          Core.logSnapshotTask {
++            stx? := none, reportingRange := .skip, task := t, cancelTk? := cancelTk
++          }
++          return
++        | .error _ =>
++          trace[addDecl] "inductive signature check failed; adding synchronously"
++      return (← doAdd)
+     | _ =>
+       trace[addDecl] "no matching async adding rules, adding synchronously"
+       return (← doAdd)
+diff --git a/src/Lean/Elab/MutualInductive.lean b/src/Lean/Elab/MutualInductive.lean
+index ecd3d16..e6bec58 100644
+--- a/src/Lean/Elab/MutualInductive.lean
++++ b/src/Lean/Elab/MutualInductive.lean
+@@ -1243,7 +1243,17 @@ private structure FinalizeInductiveDecl where
+   reserved names.
+ -/
+ private def addAuxRecs (indTypes : List InductiveType) : TermElabM Unit := do
++  if let indType :: _ := indTypes then
++    let .inductInfo info ← getConstInfo indType.name | unreachable!
++    let env ← getEnv
++    -- The signature path has already published the complete auxiliary group. A synchronous
++    -- kernel addition alone does not suffice: it may not have published the public entries.
++    let allPublished := (List.range info.numNested).all fun i =>
++      env.containsAsyncOnBranch (indType.name ++ `rec |>.appendIndexAfter (i + 1))
++    if allPublished then return
+   for indType in indTypes do
++    let .inductInfo info ← getConstInfo indType.name | unreachable!
++    if info.numNested == 0 then continue
+     let mut i := 1
+     while true do
+       let auxRecName := indType.name ++ `rec |>.appendIndexAfter i
+diff --git a/src/Lean/Environment.lean b/src/Lean/Environment.lean
+index ee36b8e..ea0b0b5 100644
+--- a/src/Lean/Environment.lean
++++ b/src/Lean/Environment.lean
+@@ -1153,6 +1153,11 @@ not block.
+ def containsOnBranch (env : Environment) (n : Name) : Bool :=
+   (env.asyncConsts.find? n |>.isSome) || (env.base.get env).constants.contains n
+ 
++/-- Checks whether a constant has direct asynchronous entries in both visibility scopes, without
++consulting the kernel environment or waiting for another branch. -/
++def containsAsyncOnBranch (env : Environment) (n : Name) : Bool :=
++  (env.asyncConstsMap.private.find? n).isSome && (env.asyncConstsMap.public.find? n).isSome
++
+ /--
+ Returns the constants added in the current module, in elaboration tree pre-order: the top-level
+ declarations in elaboration order, each followed by its asynchronous sub-declarations, recursively.
+@@ -1181,6 +1186,61 @@ where
+         (acc, seen) ← go c.aconsts.get acc seen
+     return (acc, seen)
+ 
++/-- Returns a temporary kernel environment containing local theorem signatures but not their values. -/
++def toKernelSignature (env : Environment) : BaseIO Kernel.Environment := do
++  let mut signatureEnv := env.base.private
++  for info in ← (env.setExporting false).getLocalConstantInfos (skipTheoremSubDecls := true) do
++    let info := if info.kind == .thm then
++      ConstantInfo.axiomInfo { info.toConstantVal with isUnsafe := false }
++    else
++      info.toConstantInfo
++    signatureEnv := signatureEnv.add info
++  return signatureEnv
++
++/--
++Checks an inductive against local signatures without forcing `checked`, publishes its
++constants, and leaves a promise for an ordered check in the complete environment.
++The caller must perform the complete check on `asyncEnv` and call `commitChecked` even on failure.
++-/
++def addInductiveSignature (env : Environment) (maxHeartbeats : USize) (maxRecDepth : USize)
++    (decl : Declaration) (cancelTk? : Option IO.CancelToken) :
++    BaseIO (Except Kernel.Exception PromiseCheckedResult) := do
++  if let some ctx := env.asyncCtx? then
++    if let some n := decl.getTopLevelNames.find? (!ctx.mayContain ·) then
++      return .error <| .other s!"cannot add declaration {n} to environment as it is restricted to the \
++        prefix {ctx.declPrefix}"
++  let signatureEnv ← env.toKernelSignature
++  let signatureResult := signatureEnv.addDeclCore maxHeartbeats maxRecDepth decl cancelTk?
++  match signatureResult with
++  | .error ex => return .error ex
++  | .ok checkedSignature =>
++    let mut names := decl.getNames
++    if let .inductDecl _ _ (indType :: _) _ := decl then
++      let some (.inductInfo info) := checkedSignature.find? indType.name
++        | return .error <| .other "signature kernel did not return an inductive type"
++      -- The kernel names all auxiliary recursors after the first type in the mutual group.
++      let auxNames := (List.range info.numNested).map fun i =>
++        indType.name ++ `rec |>.appendIndexAfter (i + 1)
++      for n in auxNames do
++        unless (checkedSignature.find? n).any (fun c => c matches .recInfo _) do
++          return .error <| .other s!"signature kernel did not return auxiliary recursor {n}"
++      names := names ++ auxNames
++    let mut mainEnv := env
++    for n in names do
++      let info := (checkedSignature.find? n).get!
++      mainEnv := { mainEnv with asyncConstsMap := mainEnv.asyncConstsMap.map (·.add {
++        constInfo := .ofConstantInfo info
++        exts? := none
++        aconstsImpl := .pure <| .mk (α := AsyncConsts) default
++      }) }
++    let res ← env.promiseChecked
++    return .ok { res with
++      mainEnv := { mainEnv with checked := res.mainEnv.checked }
++      -- The declaration may contain multiple inductive names, so a single-name async prefix is
++      -- insufficient. The original branch restriction was checked before the signature check.
++      asyncEnv := env.enterAsync .anonymous
++    }
++
+ def setMainModule (env : Environment) (m : Name) : Environment := Id.run do
+   let env := env.modifyCheckedAsync ({ · with
+     header.mainModule := m
+diff --git a/src/Lean/Meta/Constructions/CasesOn.lean b/src/Lean/Meta/Constructions/CasesOn.lean
+index f25a1c9..1c21f71 100644
+--- a/src/Lean/Meta/Constructions/CasesOn.lean
++++ b/src/Lean/Meta/Constructions/CasesOn.lean
+@@ -74,7 +74,18 @@ def mkCasesOn (declName : Name) : MetaM Unit := do
+   let decl ←
+     match ← mkCasesOnViaProjs? declName with
+     | some decl => pure (.defnDecl decl)
+-    | none => ofExceptKernelException (mkCasesOnImp (← getEnv).toKernelEnv declName)
++    | none =>
++      let env ← getEnv
++      if !Elab.async.get (← getOptions) then
++        ofExceptKernelException (mkCasesOnImp env.toKernelEnv declName)
++      else
++        match mkCasesOnImp (← env.toKernelSignature) declName with
++        | .ok decl => pure decl
++        | .error ex =>
++          match ex with
++          | .interrupted | .deterministicTimeout | .excessiveMemory | .deepRecursion =>
++            ofExceptKernelException (.error ex)
++          | _ => ofExceptKernelException (mkCasesOnImp env.toKernelEnv declName)
+   addDecl decl
+   setReducibleAttribute name
+   modifyEnv fun env => markAuxRecursor env name

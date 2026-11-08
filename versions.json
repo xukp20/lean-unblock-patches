@@ -1,0 +1,20 @@
+{
+  "versions": {
+    "v4.35.0": {
+      "official_commit": "eb6cafb7290e8bd5f2937522d8d804f58f02bafc",
+      "fork_branch": "unblocked/v4.35.0",
+      "fork_commit": "157b9c3bbb78662567088ce96aa43042227b1210",
+      "patches": [
+        "patches/v4.35.0/0001-perf-check-inductive-signatures-before-waiting-for-p.patch",
+        "patches/v4.35.0/0002-perf-avoid-waiting-for-an-unavailable-congruence-lem.patch"
+      ],
+      "patched_files_sha256": {
+        "src/Lean/AddDecl.lean": "446dd164aa661f88f9b94a80d6f7a45e84b442ab115620fbea2ba2919fb8251a",
+        "src/Lean/Elab/MutualInductive.lean": "5764024f88c11ce11d7a21bdf5dbf5513edb8f3ea02b3105fb689f6a67cee66b",
+        "src/Lean/Environment.lean": "61155a07b313d394be24c0fee145e889da6baec073b998d87bcc128c9dad253e",
+        "src/Lean/Meta/CongrTheorems.lean": "58352eba9107117921a41f82c1ca72ad2103fcd1a120dcf279b6ac237f4e3a5d",
+        "src/Lean/Meta/Constructions/CasesOn.lean": "c783cae21540d9f13d19ecddc6dc04e7b53f5e020a2de5a8764bd369d86d9e71"
+      }
+    }
+  }
+}
