@@ -21,11 +21,18 @@ On Linux x86-64 with Nix flakes enabled, use Lean's oldGlibc development shell a
 root="$(pwd)"
 curl -fL -o "$root/lean-llvm-x86_64-linux-gnu.tar.zst" \
   https://github.com/leanprover/lean-llvm/releases/download/23.1.0/lean-llvm-x86_64-linux-gnu.tar.zst
+nix_bin="$(command -v nix)"
 cd "$root/lean4-v4.35.0"
-nix develop .#oldGlibc -c "$root/lean-unblock-patches/build.sh" \
+env -i HOME="$HOME" PATH=/usr/bin:/bin \
+  HTTPS_PROXY="${HTTPS_PROXY:-}" HTTP_PROXY="${HTTP_PROXY:-}" \
+  ALL_PROXY="${ALL_PROXY:-}" NO_PROXY="${NO_PROXY:-}" \
+  NIX_CONFIG="${NIX_CONFIG:-}" NIX_REMOTE="${NIX_REMOTE:-}" \
+  "$nix_bin" --extra-experimental-features 'nix-command flakes' develop .#oldGlibc -c "$root/lean-unblock-patches/build.sh" \
   "$PWD" "$root/lean-llvm-x86_64-linux-gnu.tar.zst" "$root/lean-unblocked-v4.35.0" 8
 elan toolchain link lean-unblocked-v4.35.0 "$root/lean-unblocked-v4.35.0"
 ```
+
+The clean environment keeps an activated Conda environment or other host build settings from supplying dependencies to CMake.
 
 Keep a project's `lean-toolchain` file at its official value, such as `leanprover/lean4:v4.35.0`. Select the patched installation for an individual invocation with `elan run lean-unblocked-v4.35.0 lake build`. To check the official cache, run `elan run lean-unblocked-v4.35.0 lake exe cache get` in the same project before building.
 
