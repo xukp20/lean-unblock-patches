@@ -38,7 +38,14 @@ Keep a project's `lean-toolchain` file at its official value, such as `leanprove
 
 ### Prebuilt installations
 
-There is currently no published release asset for this pinned revision. If you receive a Linux archive for the pinned source built with the upstream stamp, unpack it in a new directory and use `elan toolchain link` with the directory containing `bin/lean` and `bin/lake`. Check `lean --githash` through the linked toolchain against the official commit in `versions.json`. Fork CI artifacts from earlier revisions verified archive installation but used their own fork stamps.
+The [Linux x86-64 pre-release](https://github.com/xukp20/lean4/releases/tag/v4.35.0-unblocked) can be installed directly with elan:
+
+```sh
+elan toolchain install xukp20/lean4:v4.35.0-unblocked
+elan run xukp20/lean4:v4.35.0-unblocked lean --version
+```
+
+You can also download and verify the archive and its SHA-256 file from the release, extract it, and use `elan toolchain link lean-unblocked-v4.35.0 "$PWD/lean-4.35.0-linux"`. The released package uses the upstream Git stamp pinned in `versions.json`. With that package, a fresh Mathlib checkout at `56a005855ea17e0b0958f73ec801ae140b0a1679` downloaded and unpacked all 9,031 requested official cache archives, and `lake build` succeeded without changing the observed `.olean` files. Fork CI artifacts use the fork commit stamp.
 
 ## Validation and performance
 
